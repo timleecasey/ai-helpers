@@ -11,12 +11,18 @@ The output of this skill is **not work items inside one file** — it is **N new
 
 Always start here. The file is at `STATE.md` in the project root.
 
-- `activity=planning` and `task=<id>`: resume planning that task. Open `docs/backlog/<id>.md`, see what children are already filed (look at the `# Decomposition` section if present) and continue from where the prior session left off.
+- `activity=planning` and `task=<id>`: this is a **warm resume**. The prior session was already mid-plan, almost always because `/coder` chained back via `Skill(plan-task)` at the end of its Step 8, or because a previous turn ran out of tool budget. **Do NOT re-enter Step 2's dispatch table** — its rows assume cold entry (idle STATE) and dead-end with "Stop. Tell the user to /review-task" on a planned-resume, which breaks the plan→review→execute chain. Route based on `docs/backlog/<id>.md`:
+  - `status: unplanned` — mid-grill / mid-decomposition. Read the file plus any `docs/backlog/evidence/<id>/exploration.md` left by `/coder` plus the conversation context to find the next unfinished step among Step 3 → 4 → 4a → 4b → 5 → 6. Pick up there; do not restart from Step 2's full-plan-mode entry.
+  - `status: planned` and no `# Open issues` — the prior session completed Step 5/6 (children written, parent updated). **Jump directly to Step 7 (Close out)** and chain into `/review-task`.
+  - `status: planned` and has `# Open issues` — grill-and-update mode (Step 4-bis).
+  - `status: ready` / `in-progress` / `done` / `punted` — wrong slot. Stop and tell the user.
 - `activity=executing` and `task=<id>`: an execute is in flight. Ask the user: *"Task `<id>` is in-progress. Plan-task interrupts it. Continue executing, or pause to plan something else?"* Do not proceed without confirmation.
 - `activity=prioritizing` or `bootstrapping`: ask the user whether to finish that activity first.
 - `activity=idle`: proceed to step 2.
 
 ## Step 2 — Pick the parent task and pick a mode
+
+**This step is for cold entries only (`activity=idle` in STATE.md).** If Step 1 detected a warm resume (`activity=planning task=<id>`), you have already routed past this step — do not re-enter the dispatch table. The table's "Stop. Tell the user to /review-task" outcomes assume the user is starting fresh; on a chain-back from `/coder` or a mid-flow resume, Step 7 owns the hand-off and stopping here is the bug.
 
 Read `BACKLOG.md`. Take the first entry under `## Active`. If `## Active` is empty:
 
@@ -34,7 +40,7 @@ Open `docs/backlog/<id>.md`. This is the **parent** for the rest of this skill. 
 
 | Status | `# Open issues`? | Mode |
 |---|---|---|
-| `unplanned` | n/a | **Full-plan mode.** Run Steps 3–7 as written: gather context, grill, decompose, write children, set parent to `status: planned`. |
+| `unplanned` | n/a | **Full-plan mode.** If the task is a parent (no `parent_task` frontmatter, or umbrella scope): run Steps 3–7 as written — gather context, grill, decompose into children, write children as `status: unplanned`, set parent to `status: planned`. If the task is a child (has `parent_task` set and was authored by an earlier parent decomposition): grill the existing `# Context` / `# Work` / `# Success criteria` against the current code, refresh any drift, then set this child to `status: planned`. No re-decomposition of a child into grandchildren unless the grill exposes that the child is genuinely two tasks. |
 | `planned` | yes | **Grill-and-update mode.** Skip wholesale re-decomposition; jump to Step 4-bis below. |
 | `planned` | no | Already planned and awaiting review. Tell the user to `/review-task`. Stop. |
 | `ready` | n/a | Already reviewed clean. Tell the user to `/execute-task`. Stop. |
@@ -55,13 +61,13 @@ When entering grill-and-update mode, the existing decomposition is the starting 
    - Add new children if the resolution requires a missing preceding step (per Step 5c). Insert them in dep order at the top of `## Active`.
    - Update `# Decomposition` in the parent if children were added/split/merged.
 5. **Clear the `# Open issues` block** from every file once each issue in it is addressed. The block must be empty (delete the section entirely) by the time this skill closes — its presence is the signal that work is unfinished.
-6. Leave parent and children at `status: planned`. Do NOT promote to `ready` — the next `/review-task` pass owns that transition.
+6. Leave the parent at `status: planned`. Leave children at `status: unplanned` — each child will be planned individually later via its own `/plan-task` invocation. Do NOT promote the parent to `ready` — the next `/review-task` pass owns that transition. **Higher-order planning (parent: scope, decomposition shape, dep graph, parent-level success criteria) is separated from task-order planning (each child's own grill/confirm pass). The parent is not expected to hold the context of all children during review — each child carries its own context for its own planning pass.**
 
 After grill-and-update is complete, jump to Step 7 (Close out). Do not re-run Steps 3, 4a, 4b, 5, 6 in full — they were done in the original plan-task pass and are not repeated for an issues-driven update unless an issue explicitly demands it.
 
 ## Step 3 — Gather information (refresh graph + verify via the `coder` skill)
 
-**Mechanical first — refresh the graph.** `graphify update .` is incremental (a `git diff-tree` against the manifest), so it picks up every out-of-band commit since the last refresh: terminal commits, doc-only commits the PostToolUse hook ignored, rebases, cherry-picks. The cost is small; the payoff is that the rest of this skill (and the chained `/review-task` and `/execute-task`) work off a current graph.
+**Mechanical first — refresh the graph.** `graphify update --no-vis .` is incremental (a `git diff-tree` against the manifest), so it picks up every out-of-band commit since the last refresh: terminal commits, doc-only commits the PostToolUse hook ignored, rebases, cherry-picks. The cost is small; the payoff is that the rest of this skill (and the chained `/review-task` and `/execute-task`) work off a current graph.
 
 ```sh
 graphify update . 2>&1 | tee /tmp/graphify-refresh.log
@@ -73,9 +79,12 @@ Then read everything that bears on the parent **before** asking the user anythin
 - The `parent_story` link in `docs/user-stories.md` — what is the user-visible outcome this task supports?
 - Any `source` reference — read the original context.
 - The project-root `README.md` is the **entry point into project intent** — start here to understand *why* the work exists before diving into *what* to do. Then **follow its links** out to whichever docs bear on the task: `docs/system.md`, `docs/context/<area>.md`, `tasks/<area>/*-plan.md`, package-level READMEs, etc. The aim is **full context to the extent possible** for the parent's scope: pull in linked docs greedily, prune only when a doc is clearly off-topic. If a doc you read links further, follow those too. Also read any README that sits with the code or docs the task touches (e.g. `lib/aid3/<pkg>/README.md`, `train/README.md`, `tasks/<area>/README.md`). If the root README does not yet point at a doc you found necessary, note that gap — it is a documentation defect worth surfacing back to the user.  You must read README.md.
-- Adjacent code: for any symbol-shaped question (does function/type/method X exist? what does Y call? where is Z tested? what are the callers of W?), **invoke the `coder` skill** (`Skill(skill: "coder", args: "<question> for parent <id>")`). Coder owns `graphify-out/`, queries the graph first, then verifies against source. It produces a durable exploration doc at `docs/backlog/<parent-id>-exploration.md` plus raw evidence under `docs/backlog/evidence/<parent-id>/` that this plan-task pass (and the chained `/review-task` and `/execute-task`) re-read as context. By the time you can phrase a grep precisely (you know the symbol and the relation), coder takes that same input and answers structurally — cheaper in tokens and reusable across the cycle.
+- **Routing-table context docs are MANDATORY first reads — BEFORE any graphify query.** For every directory the parent touches (per file paths in `# Context` / `# Work`), find that directory in the **Context routing table** in `.claude/CLAUDE.md` §"Context — read before working in an area" and read the mapped `docs/context/<topic>.md` file in full. The first table in each such doc is a **"Package layout"** (or equivalent) — the **authoritative file inventory** for that package, listing every `.go` source file and what each contains. Reading this BEFORE running graphify catches existence facts the graph can miss — especially **free functions in leaf packages with small communities**. Graphify's `explain "<symbol>"` substring-matches on lowercase noise; `explain ".Symbol"` only matches methods (not free functions). The routing-table doc has the file inventory regardless of graph shape.
+
+  *Worked example (2026-05-16, [20260515ax](../../../docs/backlog/20260515ax.md) # Outcome)*: planning for HydraulicManifold cross-bores filed a child task to ship new `MakeCylinderModelOnX/OnZ` STL primitives (~140 LOC + tests). The exploration ran `graphify explain ".Rotate"` and got substring-matched noise (`PackWriter.rotate`, etc.) and concluded "no Rotate helper exists". But [docs/context/stl.md](../../../docs/context/stl.md)'s very first table — "Package layout" — lists `rotate.go` explicitly. `rotate.go:9` defines `func RotateModel(m *Model, rot [3][3]float64) *Model` — a pre-existing well-tested helper that does exactly what the planned new primitives would have done. Execute-time Step 2.4 caught the miss before code shipped; if planning had read the routing-table doc first, the wasteful decomposition would never have been written.
+
+- Adjacent code: for any symbol-shaped question (does function/type/method X exist? what does Y call? where is Z tested? what are the callers of W?), **invoke the `coder` skill** (`Skill(skill: "coder", args: "<question> for parent <id>")`) — AFTER the routing-table read above. Coder owns `graphify-out/`, queries the graph first, then verifies against source. It produces a durable exploration doc at `docs/backlog/<parent-id>-exploration.md` plus raw evidence under `docs/backlog/evidence/<parent-id>/` that this plan-task pass (and the chained `/review-task` and `/execute-task`) re-read as context. By the time you can phrase a grep precisely (you know the symbol and the relation), coder takes that same input and answers structurally — cheaper in tokens and reusable across the cycle. **Brief coder with the file inventory you already read from the routing-table doc** — that gives the librarian existence facts to verify, not just symbols to query.
 - **Grep / Read is the fallback for genuinely non-symbolic searches** — hunting unstructured strings (TODO comments, magic numbers, build-flag spellings), scanning generated artifacts not covered by the graph (`generator/opplans/`, `generator/stl/`), checking file existence with no symbol involved. **Confirm what exists and what does not** before grilling the user.
-- Related context files (`docs/context/<area>.md` per the routing table in `.claude/CLAUDE.md`).
 - For machining rules: cite Machinery's Handbook 32e per `.claude/CLAUDE.md` §"Machining context".
 
 Re-reading is encouraged. The first pass orients you; once the coder verification surfaces specific files, contracts, or gaps, return to the README / context docs / parent file and read them again with that lens. A second pass over a doc you already skimmed often surfaces a constraint that was invisible the first time. Cost is cheap; missed constraints become mid-execution interrupts.
@@ -155,7 +164,7 @@ Generate a new id: `YYYYMMDD<next-suffix>` (today's date + next free `aa..zz` fr
 ---
 id: <child-id>
 title: Short imperative title (one line)
-status: planned
+status: unplanned
 created: YYYY-MM-DD
 parent_story: docs/user-stories.md#section
 parent_task: <parent-id>
@@ -283,7 +292,7 @@ Update parent frontmatter mechanically — flips `unplanned → planned` (or no-
 scripts/task-status.sh planned <parent-id>
 ```
 
-Keep the parent's existing `# Summary` and `# Notes`; they are the historical record of why the umbrella exists. New child files are written directly with `status: planned` (no script needed — they don't exist before this skill runs).
+Keep the parent's existing `# Summary` and `# Notes`; they are the historical record of why the umbrella exists. New child files are written directly with `status: unplanned` (no script needed — they don't exist before this skill runs). Each child will be promoted unplanned → planned later when its own `/plan-task` pass runs.
 
 ## Step 7 — Close out
 

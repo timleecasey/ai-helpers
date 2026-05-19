@@ -35,10 +35,15 @@ Always start here. The file is at `STATE.md` in the project root.
 
 - `activity=executing` and `task=<id>`: an execute is in flight. Ask the user: *"Task `<id>` is in-progress. Reviewing now interrupts it. Continue executing, or pause to review?"* Do not proceed without confirmation.
 - `activity=planning` and `task=<id>`: planning is mid-flight. Offer to review the parent under review now, then resume planning afterwards.
-- `activity=reviewing` and `task=<id>`: resume reviewing that task. Open `docs/backlog/<id>.md`, see what `# Open issues` are already filed, continue from where the prior session left off (next un-reviewed child, or the next risk lens not yet applied).
+- `activity=reviewing` and `task=<id>`: this is a **warm resume**. Almost always either `/coder` chained back via `Skill(review-task)` at the end of its Step 8, or a previous turn ran out of tool budget. **Do NOT re-enter Step 2's dispatch table** — its rows assume cold entry and refuse on the very status (`planned`) that a resume normally arrives at. Route based on `docs/backlog/<id>.md` plus conversation context:
+  - Lens walk not yet started (no findings recorded in conversation, no `# Open issues` block in the file): begin Step 3 (or resume from the gather-context point coder was invoked from).
+  - Lens walk in progress (some findings recorded, others pending): continue from the next un-reviewed child or the next risk lens not yet applied.
+  - Lens walk complete (all lenses applied, decision known): jump to Step 7 (write outcome) and then Step 8 (chain to `/execute-task` on pass or `/plan-task` on fail).
 - `activity=idle` or other: proceed.
 
 ## Step 2 — Pick the task to review
+
+**This step is for cold entries only (`activity=idle` in STATE.md).** If Step 1 detected a warm resume (`activity=reviewing task=<id>`), you have already routed past this step — do not re-enter the status-refusal table. The "Run /plan-task first" / "Run /execute-task" refusals below assume cold entry; on a chain-back from `/coder` they would dead-end the pipeline. Step 7/8 own the hand-off.
 
 In order:
 
@@ -118,7 +123,7 @@ A complexity finding looks like: *"Item 3 bundles encoder change + loss change +
 
 ### 4c. Business risk of failure
 
-- If the task fails its success criteria entirely, what gets escalated? A retry on the same plan? A re-plan? An external dependency missed (CNC arrival, customer demo, deadline)?
+- If the task fails its success criteria entirely, what gets escalated? A retry on the same plan? A re-plan? An external dependency missed (customer demo, deadline)?
 - Is there a deadline this task is implicitly racing? Check `parent_story` and project-level state in [STATE.md](../../../STATE.md), [.claude/CLAUDE.md](../../../.claude/CLAUDE.md), and `tasks/<area>/*-plan.md` retrospectives for time pressure.
 - Is the work reversible? A failed code change is reversible (revert); a failed schema migration or dataset overwrite may not be. Flag any irreversible step.
 
@@ -190,20 +195,22 @@ This is the most load-bearing step in the skill — a misaligned parent/child cr
 
 ## Step 7 — Write the outcome into the task file(s)
 
-Two paths: pass (zero findings across all reviewed tasks) or fail (≥1 finding on any reviewed task). The status transition is **all-or-nothing for the parent** — a parent only promotes to `ready` when the parent itself AND every child reviewed clean.
+Two paths: pass (zero findings across all reviewed tasks) or fail (≥1 finding on any reviewed task). The status transition is **parent-only** — a parent promotes to `ready` when the parent itself AND every child reviewed clean. Children stay at `status: unplanned`; each child runs its own `/plan-task` → `/review-task` → `/execute-task` cycle individually. This skill audits children to confirm the parent's decomposition is sound, but does not advance their status.
 
 ### Pass path — zero findings
 
-The pass path collapses plan/review/idle/commit into **one atomic bundle**: STATE goes to idle, every reviewed task flips to `ready`, and a single commit captures all of it. Order matters — set idle *before* the commit so STATE.md=idle is what lands in the commit:
+The pass path collapses plan/review/idle/commit into **one atomic bundle**: STATE goes to idle, the parent flips to `ready`, and a single commit captures all of it. Order matters — set idle *before* the commit so STATE.md=idle is what lands in the commit:
 
 ```sh
 # 1. Clear the breadcrumb first (modifies STATE.md → idle).
 scripts/state.sh idle
 
-# 2. Flip every reviewed task planned→ready in one batch and commit.
+# 2. Flip the parent (or leaf) planned→ready and commit. Children stay
+#    unplanned and are not in the batch — each child has its own
+#    /plan-task pass coming.
 #    task-status.sh stages docs/backlog/, BACKLOG.md, STATE.md (now idle)
 #    and creates the single bundled commit.
-scripts/task-status.sh ready <parent-id> <child-id-1> <child-id-2> ...
+scripts/task-status.sh ready <parent-id>
 # leaf: scripts/task-status.sh ready <id>
 ```
 
@@ -232,7 +239,7 @@ agenda for the next planning round, then clear this block.
 
 Lens labels: `complexity`, `customer-impact`, `business-risk`, `reproducibility`, `modeling-slice`, `release-coverage`, `criteria-alignment`. One issue per lens occurrence — do not consolidate across lenses. When promoting a child finding to the parent under the cross-child rule (see "For a parent under review" below), suffix the label with `[cross-child: <one-sentence-reason>]` and link the surfacing child — e.g. `modeling-slice [cross-child: cumulative-corpus-shift] — see child 20260509at`. The bracket is grep-able for parent close-out audits.
 
-**Status stays at `planned`** for every task that received findings. The `# Open issues` block is the signal — `/plan-task` checks for it and switches to grill-and-update mode. Decomposition, dependencies, and frontmatter otherwise remain untouched. The task does not regress to `unplanned` because its decomposition is still valid as a starting point; the open issues are deltas to apply, not a reason to throw it all out.
+**Status is not changed by the fail path.** The parent (or leaf) stays at `planned` with the new `# Open issues` block; children stay at `unplanned` with their `# Open issues` block. The block is the signal — `/plan-task` checks for it on entry and switches to grill-and-update mode regardless of which status it finds. Decomposition, dependencies, and frontmatter otherwise remain untouched; the open issues are deltas to apply, not a reason to throw it all out.
 
 **Do NOT commit on the fail path.** The dirty working tree carries over into the next `/plan-task` grill-and-update pass — repeated review failures are intentionally one big uncommitted blob, collapsed into a single commit when the cycle eventually reaches `ready`. (See [docs/process.md](../../../docs/process.md) §Lifecycle for the rationale: there's no value in checking in intermediate plan/review iterations.)
 
@@ -243,7 +250,7 @@ For a parent under review:
 - Parent-scope findings (Steps 4 or 6 against the parent itself) go into the parent's `# Open issues` block. Add `(cross-decomposition)` to the heading for Step 6 alignment findings so the next `/plan-task` knows to walk the table, not just the parent body.
 - Child-scope findings go into each affected child's `# Open issues` block.
 - **Cross-child findings on a child** — when a lens question against a child cannot be answered from the child's diff *because the concern is structurally cross-child* (cumulative effect, sibling interaction, joint coverage of a parent criterion), write the finding into the **parent's** `# Open issues` block instead and pass the child on that lens. Eligibility test: state in one sentence why the issue is cross-child. "I can't tell from this child's diff" is NOT cross-child and stays at the child as a regular finding. Use the `[cross-child: <reason>]` label suffix (per the lens-labels paragraph above) so future readers can audit what was deferred. Canonical examples: modeling-slice cumulative-corpus-shift across many ShapeSpec adds; release-coverage on a feature that only ships when N siblings land; criteria-alignment requiring combined sibling output. A child may defer at most ONE finding per lens to the parent — keeps the "one issue per lens occurrence" rule intact.
-- A child that reviewed clean stays `planned` with no `# Open issues` block — but it does NOT advance to `ready` independently. The parent and all its children only promote to `ready` together, in the next `/review-task` pass after the issues are addressed; parent-scope criteria-alignment cannot be guaranteed in pieces.
+- A child that reviewed clean stays `unplanned` with no `# Open issues` block — its own `/plan-task` → `/review-task` cycle will promote it later. A child that received findings stays `unplanned` *with* an `# Open issues` block; its own `/plan-task` will address the agenda when the child is picked up. Either way, children do not move during the parent's review.
 
 ## Step 8 — Surface and hand off
 
@@ -262,15 +269,23 @@ Then take the next action based on outcome:
 
 State and commit were already handled atomically in Step 7 (idle + bundled commit; STATE.md is now `idle` and the working tree is clean).
 
-Then transition STATE.md from `idle` to `executing` for the same parent id — `state.sh` allows `idle → any non-idle`:
+Pick the next handoff based on what was reviewed:
+
+- **Leaf task (no children)** — chain to `/execute-task` on this task. Transition STATE.md `idle → executing` for the leaf id, then invoke the execute-task skill.
+- **Parent task (had children)** — the parent is now `ready`, but children are `unplanned` and need their own `/plan-task` passes before anything can execute. Pick the first child in dep order (no unmet `depends_on`), transition STATE.md `idle → planning` for that child id, then invoke the `plan-task` skill. That child's plan-task will grill its decomposition-time content, set it to `planned`, and chain to its own `/review-task`. The chain continues child-by-child until every child is `done`; the parent auto-promotes on the last child's close-out.
 
 ```sh
-scripts/state.sh executing <parent-id>
+# leaf
+scripts/state.sh executing <leaf-id>
+# parent
+scripts/state.sh planning <first-unplanned-child-id>
 ```
 
-**Invoke the `execute-task` skill via the Skill tool, immediately, in the same response.** Do not ask the user first; the `ready` status is the explicit hand-off, and the user can interrupt mid-execution if they want to pause. One-line preface to the user is sufficient: *"Task `<id>` is now `ready`. Chaining into `/execute-task`."*
+**Invoke the next skill via the Skill tool, immediately, in the same response.** Do not ask the user first; the explicit hand-off is the `ready`/`planning` STATE transition, and the user can interrupt if they want to pause. One-line preface:
+- Leaf: *"Task `<id>` is now `ready`. Chaining into `/execute-task`."*
+- Parent: *"Parent `<id>` is `ready`. Chaining into `/plan-task` on first child `<child-id>`."*
 
-Tool call shape: `Skill(skill: "execute-task")`. The execute-task skill's Step 1 will detect `activity=executing task=<parent-id>` and resume on that task; it then walks the work items, runs inner-loop tests, gates completion on `make test-long`, and moves the task to `done`. If a gap is discovered mid-execution, execute-task chains back to `/plan-task` on its own (per its skill description), which re-enters this plan→review→execute cycle.
+Tool call shape: `Skill(skill: "execute-task")` or `Skill(skill: "plan-task")`. The next skill's Step 1 will detect the STATE transition and resume on the right task. If a gap is discovered mid-execution, execute-task chains back to `/plan-task` on its own (per its skill description), which re-enters the plan→review→execute cycle.
 
 ### Fail path — issues written
 

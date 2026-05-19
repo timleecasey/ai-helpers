@@ -7,11 +7,13 @@ You are implementing a single planned task from start to finish. Quality and cor
 
 ## Step 1 — Read STATE.md
 
-- `activity=executing` and `task=<id>`: resume that task. Open `docs/backlog/<id>.md`, find the first unchecked work item, continue from there.
+- `activity=executing` and `task=<id>`: this is a **warm resume**. Almost always either `/coder` chained back via `Skill(execute-task)` at the end of its Step 8, or a previous turn ran out of tool budget. **Do NOT re-enter Step 2's status-refusal table** — the refusals there ("Run /plan-task first", "Run /review-task") assume cold entry and dead-end the pipeline on a chain-back. Open `docs/backlog/<id>.md`, find the first unchecked work item in `# Work`, and continue from there. If `/coder` left an `docs/backlog/evidence/<id>/exploration.md`, read it for the structural evidence that prompted the chain-back before resuming the work item.
 - `activity=planning`: ask the user — planning isn't finished. Should they finish first, or pick a different task?
 - `activity=idle`: continue.
 
 ## Step 2 — Pick the task
+
+**This step is for cold entries only (`activity=idle` in STATE.md).** If Step 1 detected a warm resume (`activity=executing task=<id>`), you have already routed past this step — do not re-enter the status-refusal table below. The refusals assume cold entry and would dead-end a chain-back from `/coder` mid-execution.
 
 Look at `STATE.md` first; if `task` is set and the file exists, use that. Otherwise read `BACKLOG.md` and take the top entry under `## Active`.
 
