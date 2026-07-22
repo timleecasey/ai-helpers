@@ -15,6 +15,11 @@
 # Legal source → target transitions:
 #   unplanned   → planned       (/plan-task full-plan mode)
 #   planned     → ready         (/review-task pass)
+#   planned     → unplanned     (/plan-task grill-and-update demotes a child back
+#                                under the children-at-unplanned model — children
+#                                start as unplanned siblings of a planned parent,
+#                                each gets its own /plan-task pass later; see
+#                                .claude/skills/plan-task/SKILL.md §"Step 4-bis")
 #   ready       → in-progress   (/execute-task start)
 #   in-progress → done          (/execute-task close-out)
 #   in-progress → planned       (/execute-task gap discovered, task paused)
@@ -23,8 +28,10 @@
 # Anything else is refused.
 #
 # Special behavior for `ready`:
-#   • Accepts multiple ids in one call (parent + children promote together
-#     per /review-task §"Status lifecycle").
+#   • Normally called with a single id — /review-task promotes parent
+#     only (children stay `unplanned` and progress through their own
+#     /plan-task → /review-task cycles per docs/process.md §"Parent /
+#     child model"). Multi-id form is retained for ad-hoc batch promotion.
 #   • After flipping all ids, stages docs/backlog/, BACKLOG.md, and
 #     STATE.md, then creates a single commit:
 #         "Ready <first-id> — <first-id title>"
@@ -84,6 +91,7 @@ is_legal() {
     case "$from→$to" in
         unplanned→planned)   return 0 ;;
         planned→ready)       return 0 ;;
+        planned→unplanned)   return 0 ;;  # /plan-task grill-and-update can demote a child back to unplanned (children-at-unplanned model; per .claude/skills/plan-task/SKILL.md Step 4-bis)
         ready→in-progress)   return 0 ;;
         in-progress→done)    return 0 ;;
         in-progress→planned) return 0 ;;
@@ -157,7 +165,7 @@ for id in "${ids[@]}"; do
     fi
     if ! is_legal "$cur" "$new_status"; then
         echo "task-status.sh: refusing $id transition '$cur' → '$new_status'" >&2
-        echo "  Legal: unplanned→planned, planned→ready, ready→in-progress," >&2
+        echo "  Legal: unplanned→planned, planned→{ready,unplanned}, ready→in-progress," >&2
         echo "         in-progress→{done,planned}, *→punted" >&2
         exit 1
     fi
